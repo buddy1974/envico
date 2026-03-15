@@ -1,0 +1,270 @@
+{
+  "_comment": "Envico CareOS 2026 — Referral Intake Workflow. Import via n8n > Workflows > Import from File.",
+  "name": "Envico CareOS — Referral Intake",
+  "active": false,
+  "id": "envico-workflow-referral-intake-001",
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+
+  "nodes": [
+
+    {
+      "id": "node-01",
+      "name": "Webhook — POST /referral-intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "envico-referral-intake-v1",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "referral-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "Entry point. POST JSON body to this endpoint. Configure n8n base URL + this path for your n8n webhook URL."
+    },
+
+    {
+      "id": "node-02",
+      "name": "Parse Input Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "parameters": {
+        "jsCode": "// Extract and sanitise all expected fields from the POST body.\n// Defaults are applied here — validation happens in the next node.\n\nconst body = $input.first().json;\n\nreturn [{\n  json: {\n    service_user_name : (body.service_user_name  || '').trim(),\n    dob               : (body.dob                || '').trim(),\n    referral_source   : (body.referral_source    || '').trim(),\n    referrer_name     : (body.referrer_name      || '').trim(),\n    referrer_contact  : (body.referrer_contact   || '').trim(),\n    support_needs     : (body.support_needs      || '').trim(),\n    urgency_level     : (body.urgency_level      || 'standard').trim().toLowerCase(),\n    received_at       : new Date().toISOString()\n  }\n}];"
+      },
+      "notes": "Outputs: service_user_name, dob, referral_source, referrer_name, referrer_contact, support_needs, urgency_level, received_at"
+    },
+
+    {
+      "id": "node-03",
+      "name": "Validate Required Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "parameters": {
+        "jsCode": "// Rules:\n//   service_user_name — required\n//   referral_source   — required\n//   urgency_level     — must be emergency | urgent | standard (defaults to standard if invalid)\n\nconst d = $input.first().json;\nconst errors = [];\nconst VALID_URGENCY = ['emergency', 'urgent', 'standard'];\n\nif (!d.service_user_name)\n  errors.push('service_user_name is required');\n\nif (!d.referral_source)\n  errors.push('referral_source is required');\n\nif (d.urgency_level && !VALID_URGENCY.includes(d.urgency_level)) {\n  errors.push(`urgency_level must be one of: ${VALID_URGENCY.join(', ')}`);\n  d.urgency_level = 'standard'; // fallback to safe default\n}\n\nreturn [{\n  json: {\n    ...d,\n    _valid  : errors.length === 0,\n    _errors : errors\n  }\n}];"
+      },
+      "notes": "Adds _valid (boolean) and _errors (string[]) to the payload. IF node branches on _valid."
+    },
+
+    {
+      "id": "node-04",
+      "name": "Validation Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-valid-flag",
+              "leftValue": "={{ $json._valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "true branch (output 0) → Generate Referral ID. false branch (output 1) → Respond Validation Error."
+    },
+
+    {
+      "id": "node-04b",
+      "name": "Respond — Validation Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 480],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'Validation failed', details: $json._errors }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "notes": "Returns HTTP 400. Example: { success: false, error: 'Validation failed', details: ['service_user_name is required'] }"
+    },
+
+    {
+      "id": "node-05",
+      "name": "Generate Referral ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "parameters": {
+        "jsCode": "// Format: ENV-REF-{YEAR}-{RANDOM6}\n// Charset excludes ambiguous chars (O, 0, I, 1) for readability.\n\nconst { _valid, _errors, ...data } = $input.first().json;\n\nconst year  = new Date().getFullYear();\nconst chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';\nlet rand6   = '';\nfor (let i = 0; i < 6; i++)\n  rand6 += chars[Math.floor(Math.random() * chars.length)];\n\nreturn [{\n  json: {\n    ...data,\n    referral_id : `ENV-REF-${year}-${rand6}`,\n    status      : 'received'\n  }\n}];"
+      },
+      "notes": "Produces referral_id e.g. ENV-REF-2026-T7KX4M. Strips validation metadata before DB operations."
+    },
+
+    {
+      "id": "node-06",
+      "name": "DB — Insert Referral",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1440, 300],
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURE_CREDENTIAL_ID",
+          "name": "Envico PostgreSQL"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO referrals (\n  reference_number,\n  referrer_name,\n  referrer_organisation,\n  referrer_email,\n  client_name,\n  client_dob,\n  care_type,\n  urgency,\n  status,\n  notes\n) VALUES (\n  '{{$json.referral_id}}',\n  NULLIF('{{$json.referrer_name}}', ''),\n  NULLIF('{{$json.referral_source}}', ''),\n  NULLIF('{{$json.referrer_contact}}', ''),\n  '{{$json.service_user_name}}',\n  NULLIF('{{$json.dob}}', '')::DATE,\n  'domiciliary',\n  '{{$json.urgency_level}}',\n  'received',\n  NULLIF('{{$json.support_needs}}', '')\n)\nRETURNING id, reference_number;",
+        "options": {}
+      },
+      "notes": "Inserts into referrals table. NULLIF handles empty strings as NULL. RETURNING provides the DB uuid (id) for downstream nodes."
+    },
+
+    {
+      "id": "node-07",
+      "name": "DB — Create Task",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURE_CREDENTIAL_ID",
+          "name": "Envico PostgreSQL"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO tasks (\n  title,\n  description,\n  task_type,\n  entity_type,\n  entity_id,\n  priority,\n  status,\n  due_date\n) VALUES (\n  'Review new referral — {{ $('Generate Referral ID').item.json.referral_id }}',\n  'New referral received for {{ $('Generate Referral ID').item.json.service_user_name }}. Source: {{ $('Generate Referral ID').item.json.referral_source }}. Urgency: {{ $('Generate Referral ID').item.json.urgency_level }}. Please review and assign.',\n  'review',\n  'referral',\n  '{{$json.id}}',\n  CASE\n    WHEN '{{ $('Generate Referral ID').item.json.urgency_level }}' = 'emergency' THEN 'urgent'\n    WHEN '{{ $('Generate Referral ID').item.json.urgency_level }}' = 'urgent'    THEN 'high'\n    ELSE 'medium'\n  END,\n  'open',\n  CASE\n    WHEN '{{ $('Generate Referral ID').item.json.urgency_level }}' = 'emergency' THEN NOW() + INTERVAL '2 hours'\n    WHEN '{{ $('Generate Referral ID').item.json.urgency_level }}' = 'urgent'    THEN NOW() + INTERVAL '24 hours'\n    ELSE NOW() + INTERVAL '72 hours'\n  END\n)\nRETURNING id;",
+        "options": {}
+      },
+      "notes": "Creates a manager review task. Due date is auto-calculated from urgency: emergency=2h, urgent=24h, standard=72h. entity_id links to referrals.id."
+    },
+
+    {
+      "id": "node-08",
+      "name": "DB — Notify Manager",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1920, 300],
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURE_CREDENTIAL_ID",
+          "name": "Envico PostgreSQL"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO notifications (\n  recipient_id,\n  title,\n  body,\n  notification_type,\n  entity_type,\n  entity_id,\n  channel,\n  is_read,\n  status\n)\nSELECT\n  u.id,\n  'New Referral: {{ $('Generate Referral ID').item.json.referral_id }}',\n  'A new referral has been received for {{ $('Generate Referral ID').item.json.service_user_name }}. Urgency: {{ $('Generate Referral ID').item.json.urgency_level }}. Source: {{ $('Generate Referral ID').item.json.referral_source }}. Please review and assign.',\n  'referral',\n  'referral',\n  '{{ $('DB — Insert Referral').item.json.id }}',\n  'in_app',\n  false,\n  'pending'\nFROM users u\nWHERE u.role IN ('manager', 'admin')\n  AND u.is_active = true\nRETURNING id;",
+        "options": {}
+      },
+      "notes": "Inserts one notification row per active manager/admin. Uses SELECT FROM users to fan out. Channel defaults to in_app — add email/telegram variants as needed."
+    },
+
+    {
+      "id": "node-09",
+      "name": "DB — Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2160, 300],
+      "credentials": {
+        "postgres": {
+          "id": "CONFIGURE_CREDENTIAL_ID",
+          "name": "Envico PostgreSQL"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_logs (\n  action,\n  entity_type,\n  entity_id,\n  new_values\n) VALUES (\n  'create',\n  'referral',\n  '{{ $('DB — Insert Referral').item.json.id }}',\n  jsonb_build_object(\n    'reference_number', '{{ $('Generate Referral ID').item.json.referral_id }}',\n    'client_name',      '{{ $('Generate Referral ID').item.json.service_user_name }}',\n    'referral_source',  '{{ $('Generate Referral ID').item.json.referral_source }}',\n    'urgency',          '{{ $('Generate Referral ID').item.json.urgency_level }}',\n    'status',           'received',\n    'created_via',      'webhook',\n    'received_at',      '{{ $('Generate Referral ID').item.json.received_at }}'\n  )\n)\nRETURNING id;",
+        "options": {}
+      },
+      "notes": "Immutable audit entry. jsonb_build_object keeps new_values structured for querying. user_id left null as this is a system/webhook action — extend if auth is added."
+    },
+
+    {
+      "id": "node-10",
+      "name": "Respond — Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2400, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  success      : true,\n  referral_id  : $('Generate Referral ID').item.json.referral_id,\n  client_name  : $('Generate Referral ID').item.json.service_user_name,\n  urgency      : $('Generate Referral ID').item.json.urgency_level,\n  status       : 'received',\n  message      : 'Referral received and logged successfully'\n}) }}",
+        "options": {
+          "responseCode": 201
+        }
+      },
+      "notes": "Returns HTTP 201 Created. Example: { success: true, referral_id: 'ENV-REF-2026-T7KX4M', client_name: 'Jane Smith', urgency: 'standard', status: 'received' }"
+    }
+
+  ],
+
+  "connections": {
+
+    "Webhook — POST /referral-intake": {
+      "main": [
+        [{ "node": "Parse Input Fields",       "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Parse Input Fields": {
+      "main": [
+        [{ "node": "Validate Required Fields", "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Validate Required Fields": {
+      "main": [
+        [{ "node": "Validation Passed?",        "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Validation Passed?": {
+      "main": [
+        [{ "node": "Generate Referral ID",      "type": "main", "index": 0 }],
+        [{ "node": "Respond — Validation Error","type": "main", "index": 0 }]
+      ]
+    },
+
+    "Generate Referral ID": {
+      "main": [
+        [{ "node": "DB — Insert Referral",      "type": "main", "index": 0 }]
+      ]
+    },
+
+    "DB — Insert Referral": {
+      "main": [
+        [{ "node": "DB — Create Task",          "type": "main", "index": 0 }]
+      ]
+    },
+
+    "DB — Create Task": {
+      "main": [
+        [{ "node": "DB — Notify Manager",       "type": "main", "index": 0 }]
+      ]
+    },
+
+    "DB — Notify Manager": {
+      "main": [
+        [{ "node": "DB — Audit Log",            "type": "main", "index": 0 }]
+      ]
+    },
+
+    "DB — Audit Log": {
+      "main": [
+        [{ "node": "Respond — Success",         "type": "main", "index": 0 }]
+      ]
+    }
+
+  }
+}
