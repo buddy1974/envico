@@ -25,23 +25,17 @@ CREATE TABLE users (
 -- =============================================================
 CREATE TABLE referrals (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    reference_number VARCHAR(50) UNIQUE NOT NULL,
-    referrer_name VARCHAR(255) NOT NULL,
-    referrer_organisation VARCHAR(255),
-    referrer_email VARCHAR(255),
-    referrer_phone VARCHAR(50),
-    client_name VARCHAR(255) NOT NULL,
-    client_dob DATE,
-    client_nhs_number VARCHAR(20),
-    care_type VARCHAR(100) NOT NULL, -- supported_living, domiciliary, residential
-    support_hours_per_week NUMERIC(6,2),
-    funding_source VARCHAR(100), -- local_authority, self_funded, nhs, mixed
-    urgency VARCHAR(20) NOT NULL DEFAULT 'standard', -- emergency, urgent, standard
-    status VARCHAR(50) NOT NULL DEFAULT 'received', -- received, under_review, assessment_booked, accepted, declined, waitlist
-    assigned_to UUID REFERENCES users(id),
-    notes TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    referral_id TEXT UNIQUE NOT NULL,
+    service_user_name TEXT NOT NULL,
+    dob DATE,
+    referral_source TEXT NOT NULL,
+    referrer_name TEXT,
+    referrer_contact TEXT,
+    support_needs TEXT,
+    urgency_level TEXT,
+    status TEXT DEFAULT 'NEW',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- =============================================================
